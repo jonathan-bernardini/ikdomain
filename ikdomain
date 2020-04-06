@@ -1,0 +1,326 @@
+#!/bin/bash
+#check website script
+#set -ex
+RDAPCOM="https://rdap.org/domain/"
+RDAPCH="https://rdap.nic.ch/domain/"
+RDAPDE="https://rdap.denic.de/domain/"
+DEBUG=0;
+jq="/usr/bin/jq"
+_registrarfilter='.entities[0].vcardArray[1][1][3]'
+_dnsecfilter='.secureDNS.delegationSigned'
+_exipirationfilter='.events'
+_domainstatusfilter='.status[0]'
+
+usage() {
+        cat <<EOF
+ check website script
+
+ please enter a valid domain
+EOF
+
+}
+
+
+
+
+_warn() {
+  _echoc >&2  "$*" "red"
+}
+
+_die() {
+  echo >&2  "$*"
+  exit 1
+}
+
+_debug() {
+  if [[ $DEBUG -eq 1 ]]
+  then
+    _echoc "$*" "yellow"
+  fi 
+}
+
+_title(){
+
+    _echoc "$*" "green"
+}
+
+#echo with color
+ _echoc() {
+  local c=$2
+  #echo $c
+
+  case $c in
+    *"blue")
+     echo -e "\e[34m$1\e[0m" 
+     ;;
+      *"red")
+     echo -e "\e[31m$1\e[0m" 
+     ;;
+      *"green")
+     echo -e "\e[32m$1\e[0m" 
+     ;;
+    *"yellow")
+     echo -e "\e[33m$1\e[0m" 
+     ;;
+  esac    
+}
+
+
+__get_ns () {
+
+local _input    
+_input=$1 
+local _ns
+_ns=$(dig NS "$_input" +short)
+[[ -z "$_ns" ]] && echo "No NS server" ||  echo "$_ns"
+
+}
+
+__get_records () {
+ local _ip
+ _ip=$(dig A "$1" +short)
+ local _ipv6
+ _ipv6=$(dig AAAA "$1" +short) 
+ #echo "$_ip $_ipv6"
+ if [[ -z "$_ip" ]]; then
+  _warn "No A record"
+
+else
+  echo "$_ip"
+  _ip=$_ip | grep -oE '((1?[0-9][0-9]?|2[0-4][0-9]|25[0-5])\.){3}(1?[0-9][0-9]?|2[0-4][0-9]|25[0-5])'  
+  echo "PTR : $(dig -x $_ip +short)"
+ fi
+ 
+ [[ -z "$_ipv6" ]] && _warn "No AAAA record" || echo "$_ipv6" ; # echo "PTR : $(dig -x $_ipv6 +short)"
+}
+
+#curl function 
+
+_get_curls () {
+  _title "curl"   
+local _domain
+_domain=$1
+
+for  i  in {"http://","https://","http://www.","https://www."} ; do
+  ##max redirect 
+    _curl=$(_get_curl_status "$i$_domain") 
+    _separate;
+    echo "$i$_domain:"
+    [ -z "$_curl"  ] && _warn "not reachable" || echo "$_curl"
+done 
+}
+
+
+_get_curl_status () {
+local _url
+ _url=$1
+  ##max redirect 
+  echo "$(curl -sSIL --max-redirs 30 "$_url" -m 10 2>&1 | grep HTTP)" # <(echo $1)
+    
+}
+
+_get_domain_from_host()
+{
+  sed -e 's/^\([^\.]\+\.\)\?\([^\.]\+\)\.\([^\.]\+\)$/\2.\3/' <(echo $1)
+}
+
+
+_separate(){
+ echo "----------------------------------"
+}
+
+
+_get_whois_informations () {
+
+_registrar=""
+_expiration=""
+
+local _domain
+_domain=$1
+
+#whois -H $_domain="whois -H $_domain"
+case $_domain in
+#.ch    
+    *".ch" )
+    #_registrar=$(whois -H $_domain | grep -i -A 1 -m 1 registrar: )
+    _registrar=$(curl -sL "$RDAPCH$_domain" | jq "$_registrarfilter") 
+   # _expiration=$(curl -sL $RDAPCH$_domain | jq "$_expiration")
+    _debug "$RDAPCH$_domain  $_registrarfilter" 
+    _debug "$_registrar"  
+    _dnssec=$(whois -H "$_domain" | grep -i DNSsEC)
+    ;;
+#.be .eu        
+    *".be" | *".eu" ) 
+    _registrar=$(whois -H "$_domain" | grep -i -A 1 -m 1 registrar:)
+    _dnssec="n" 
+    ;;
+#.fr
+    *".fr" ) 
+     _debug ".fr"
+    _registrar=$(whois -H "$_domain" | grep -i  -m 1 registrar:)
+    _dnssec="n" 
+    ;;
+#.de
+    *".de" ) 
+    #_registrar="not available with '.de': $(whois -H $_domain | grep -i  -m 1 Nserver:)"
+    _registrar=$(curl -sL "$RDAPDE$_domain" | jq "$_registrarfilter") 
+    _dnssec="n" 
+    ;;
+#.lu
+    *".lu" ) 
+    _registrar=$(whois -H "$_domain" | grep -i  -m 1 registrar-name:)
+    _dnssec="n" 
+    ;;
+#.it
+    *".it" ) 
+    _registrar=$(whois -H "$_domain" | grep -i -A 1 -m 1 registrar)
+    _dnssec=$(whois -H "$_domain" | grep -i DNSsEC) 
+    ;;
+#.pt
+    *".pt" ) 
+    _registrar=$(whois -H "$_domain" | grep -i "Admin Name")
+    _dnssec="n"   
+    ;;
+    *".es" )
+    _debug ".es "
+    _registrar="no whois service for .es"
+    _dnssec="n"   
+    ;;
+     *".swiss" )
+    _debug ".swiss"
+    _registrar=$(whois -H "$_domain" | grep -i  -m 1 registrar:)
+    _dnssec=$(whois -H "$_domain" | grep -i DNsSEC -m 1)   
+    ;;
+#.com     
+    *".com" | ".net" | ".name" | ".cc" | ".tv" )
+    _debug ".com and verisign"
+    
+    _registrar=$(curl -sL "$RDAPCOM$_domain" | jq  "$_registrarfilter") 
+    _expiration=$(curl -sL $RDAPCOM$_domain | jq  "$_exipirationfilter")
+    _status=$(curl -sL $RDAPCOM$_domain   | jq  "$_domainstatusfilter")
+    _dnssec=$(curl -sL "$RDAPCOM$_domain" | jq  "$_dnsecfilter") 
+    _debug "$_registrar"
+    ;;
+     "" )
+     usage 
+     _die
+    ;;   
+
+
+    * )
+    _debug "other"
+    _registrar=$(whois -H "$_domain" | grep -i  -m 1 registrar:)
+    _dnssec=$(whois -H "$_domain" | grep -i DNsSEC -m 1)   
+    ;;
+
+esac
+
+if [ -z "$_registrar" ] ; then
+ _warn "This domain doesn't exist" 
+ _die
+else    
+  _title "Registrar : $_registrar" 
+ fi
+
+
+if [ $_dnssec == "n" ] ;then
+echo "DNSSEC : function not available"
+else
+[ -z "$_dnssec"  ] && _warn "DNSSEC : no" || echo "DNSSEC: yes"
+fi
+
+
+if [ -z "$_expiration" ] ;then 
+   _warn "Expiration not available" 
+else
+    
+    echo "$_expiration" | jq
+fi
+
+[ -z "$_status" ] && _warn "Status not available" || echo "Status : $_status"
+
+}
+
+_mainikdomain() {
+
+_debug "$_domain"
+
+
+#get domain from host 
+_domain="$(_get_domain_from_host $1)"
+
+
+#WHOIS 
+_get_whois_informations "$_domain"
+
+#NAME SERVER  
+_separate
+_title "Name Server:"  
+
+echo "$(__get_ns "$_domain")"
+
+#MX
+_separate
+_title "MX:"
+
+_mx=$(dig MX $_domain +short)
+
+[ -z "$_mx" ] && _warn "no mx"  || echo $_mx
+
+#A record and AAAA record
+_separate
+
+_title "@ :"
+echo "$(__get_records "$_domain")"
+
+#WWW / A record and AAAA record
+_title "www :"
+echo "$(__get_records "www.$_domain")"
+ 
+_separate
+
+#CURL 
+_title "CURL"
+_get_curls "$_domain"
+
+_separate
+
+#openSSL 
+
+_title "SSL"
+
+echo | openssl s_client -brief "$_domain":443 #2>&1 
+_title "www. SSL"
+_separate
+echo | openssl s_client -brief "www.$_domain":443 #2>&1 
+}
+
+
+
+#[ -z "$_openssl"  ] && echo "SSL : no"
+_debug $OPTIND
+_debug $getopts
+
+
+   _mainikdomain "$@"
+
+while getopts "uh" option; do
+ echo "OPT: $option ARG: ${OPTARG}" 
+  case $"${option}" in
+    h)
+    usage
+    exit
+    ;;
+    u)
+    
+     
+    ;;
+    "?") 
+    usage
+    exit
+   
+
+ esac
+  
+done
+
